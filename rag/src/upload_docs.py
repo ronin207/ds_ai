@@ -15,7 +15,8 @@ project_root = Path(__file__).resolve().parent.parent.parent
 sys.path.append(str(project_root))
 
 from config import RAW_DATA_DIR
-from rag.src.rag_advanced import AdvancedRAG
+from rag.src.cli import initialize_rag, get_pdf_files
+from rag.models.rag_advanced import AdvancedRAG
 
 def validate_file(file_path: str) -> bool:
     """Validate if the file exists and has a supported extension."""

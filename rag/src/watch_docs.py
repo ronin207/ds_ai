@@ -18,7 +18,7 @@ project_root = Path(__file__).resolve().parent.parent.parent
 sys.path.append(str(project_root))
 
 from config import RAW_DATA_DIR
-from rag.src.rag_advanced import AdvancedRAG
+from rag.src.cli import initialize_rag, get_pdf_files
 
 # Setup logging
 logging.basicConfig(
@@ -36,6 +36,11 @@ class DocumentWatcher:
         self.state_file = Path(self.watch_dir) / state_file
         self.file_states: Dict[str, str] = {}
         self.supported_extensions = {'.pdf', '.txt', '.md', '.doc', '.docx'}
+        self.recent_changes = {
+            'added': set(),
+            'modified': set(),
+            'deleted': set()
+        }
         self.load_state()
         
     def load_state(self):
@@ -77,10 +82,19 @@ class DocumentWatcher:
             if f.is_file() and f.suffix.lower() in self.supported_extensions
         }
     
-    def check_for_changes(self) -> bool:
-        """Check for any changes in the documentation files."""
+    def check_for_changes(self) -> Dict[str, Set[str]]:
+        """
+        Check for any changes in the documentation files.
+        
+        Returns:
+            Dict with 'added', 'modified', and 'deleted' file sets
+        """
         current_files = self.get_current_files()
-        changes_detected = False
+        changes = {
+            'added': set(),
+            'modified': set(),
+            'deleted': set()
+        }
         
         # Check for new or modified files
         for file_path in current_files:
@@ -89,10 +103,10 @@ class DocumentWatcher:
             
             if rel_path not in self.file_states:
                 logging.info(f"New file detected: {rel_path}")
-                changes_detected = True
+                changes['added'].add(str(file_path))
             elif self.file_states[rel_path] != current_hash:
                 logging.info(f"Modified file detected: {rel_path}")
-                changes_detected = True
+                changes['modified'].add(str(file_path))
             
             self.file_states[rel_path] = current_hash
         
@@ -105,19 +119,52 @@ class DocumentWatcher:
             logging.info(f"Deleted files detected: {deleted_files}")
             for file in deleted_files:
                 del self.file_states[file]
-            changes_detected = True
+                changes['deleted'].add(str(self.watch_dir / file))
         
-        return changes_detected
-    
-    def update_knowledge_base(self):
-        """Update the RAG system's knowledge base."""
+        return changes
+
+    def update_knowledge_base(self, changes: Dict[str, Set[str]]):
+        """
+        Update the RAG system's knowledge base incrementally.
+        
+        Args:
+            changes: Dict with 'added', 'modified', and 'deleted' file sets
+        """
         try:
-            rag = AdvancedRAG()
-            rag.setup_knowledge_base()
-            logging.info("Successfully updated knowledge base")
+            # Get or create RAG instance
+            rag = initialize_rag()
+            
+            # Handle new and modified files
+            files_to_update = changes['added'] | changes['modified']
+            if files_to_update:
+                rag.update_knowledge_base_incremental(list(files_to_update))
+                logging.info(f"Successfully updated knowledge base with {len(files_to_update)} files")
+                
+                # Update recent changes
+                self.recent_changes['added'].update(changes['added'])
+                self.recent_changes['modified'].update(changes['modified'])
+            
+            # Handle deleted files
+            if changes['deleted']:
+                logging.info("Detected deleted files, rebuilding vector store...")
+                rag.rebuild_vector_store()
+                self.recent_changes['deleted'].update(changes['deleted'])
+            
+            # Keep only recent changes (last 24 hours)
+            self._prune_old_changes()
+            
         except Exception as e:
             logging.error(f"Error updating knowledge base: {e}")
     
+    def _prune_old_changes(self):
+        """Remove changes older than 24 hours."""
+        current_time = time.time()
+        for change_type in self.recent_changes:
+            self.recent_changes[change_type] = {
+                f for f in self.recent_changes[change_type]
+                if Path(f).exists() and (current_time - Path(f).stat().st_mtime) < 86400
+            }
+
     def watch(self, interval_seconds: int = 300):
         """
         Watch for changes in documentation and update knowledge base when needed.
@@ -130,9 +177,10 @@ class DocumentWatcher:
         
         try:
             while True:
-                if self.check_for_changes():
+                changes = self.check_for_changes()
+                if any(changes.values()):  # If any changes detected
                     logging.info("Changes detected, updating knowledge base...")
-                    self.update_knowledge_base()
+                    self.update_knowledge_base(changes)
                     self.save_state()
                 
                 time.sleep(interval_seconds)
